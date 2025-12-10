@@ -32,97 +32,63 @@ const authenticateToken = (req, res, next) => {
   });
 };
 
-// ==========================================
-// ROTA DE TESTE
-// ==========================================
-app.get('/', (req, res) => {
-  res.send('Aventurizer RPG Backend Online 🚀');
-});
+app.get('/', (req, res) => res.send('Aventurizer RPG Backend Online 🚀'));
 
 // ==========================================
 // ROTAS DE USUÁRIO
 // ==========================================
 
-// 1. REGISTRO
 app.post('/api/register', async (req, res) => {
   const { username, password, role } = req.body;
-
-  if (!username || !password || !role) {
-    return res.status(400).json({ error: 'Preencha todos os campos.' });
-  }
-
-  if (role !== 'gm' && role !== 'player') {
-    return res.status(400).json({ error: 'Papel inválido. Use "gm" ou "player".' });
-  }
+  if (!username || !password || !role) return res.status(400).json({ error: 'Preencha todos os campos.' });
+  if (role !== 'gm' && role !== 'player') return res.status(400).json({ error: 'Papel inválido.' });
 
   try {
     const userCheck = await pool.query('SELECT id FROM users WHERE username = $1', [username]);
-    if (userCheck.rows.length > 0) {
-      return res.status(400).json({ error: 'Nome de usuário indisponível.' });
-    }
+    if (userCheck.rows.length > 0) return res.status(400).json({ error: 'Nome indisponível.' });
 
     const salt = await bcrypt.genSalt(10);
     const hash = await bcrypt.hash(password, salt);
     const newId = crypto.randomUUID();
 
-    await pool.query(
-      'INSERT INTO users (id, username, password_hash, role) VALUES ($1, $2, $3, $4)',
-      [newId, username, hash, role]
-    );
-
-    res.status(201).json({ success: true, message: 'Usuário criado com sucesso!' });
+    await pool.query('INSERT INTO users (id, username, password_hash, role) VALUES ($1, $2, $3, $4)', [newId, username, hash, role]);
+    res.status(201).json({ success: true });
   } catch (err) {
-    console.error("Erro no registro:", err);
     res.status(500).json({ error: 'Erro ao criar usuário.' });
   }
 });
 
-// 2. LOGIN
 app.post('/api/login', async (req, res) => {
   const { username, password } = req.body;
   try {
     const result = await pool.query('SELECT * FROM users WHERE username = $1', [username]);
     const user = result.rows[0];
-
     if (!user) return res.status(400).json({ error: 'Usuário não encontrado' });
 
     const validPassword = await bcrypt.compare(password, user.password_hash);
     if (!validPassword) return res.status(400).json({ error: 'Senha incorreta' });
 
-    const token = jwt.sign(
-      { id: user.id, username: user.username, role: user.role },
-      process.env.JWT_SECRET,
-      { expiresIn: '24h' }
-    );
-
+    const token = jwt.sign({ id: user.id, username: user.username, role: user.role }, process.env.JWT_SECRET, { expiresIn: '24h' });
     res.json({ token, user: { name: user.username, role: user.role } });
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Erro interno no servidor' });
+    res.status(500).json({ error: 'Erro interno' });
   }
 });
 
-// 3. TROCAR SENHA
 app.post('/api/change-password', authenticateToken, async (req, res) => {
   const { oldPassword, newPassword } = req.body;
   try {
     const userRes = await pool.query('SELECT * FROM users WHERE id = $1', [req.user.id]);
-    const user = userRes.rows[0];
-    
-    const valid = await bcrypt.compare(oldPassword, user.password_hash);
-    if (!valid) return res.status(400).json({ error: 'Senha atual incorreta' });
+    const valid = await bcrypt.compare(oldPassword, userRes.rows[0].password_hash);
+    if (!valid) return res.status(400).json({ error: 'Senha incorreta' });
 
     const salt = await bcrypt.genSalt(10);
     const hash = await bcrypt.hash(newPassword, salt);
-    
     await pool.query('UPDATE users SET password_hash = $1 WHERE id = $2', [hash, req.user.id]);
     res.json({ success: true });
-  } catch(e) {
-    res.status(500).json({ error: 'Erro ao trocar senha' });
-  }
+  } catch(e) { res.status(500).json({ error: 'Erro ao trocar senha' }); }
 });
 
-// 4. MEUS PERSONAGENS
 app.get('/api/my-characters', authenticateToken, async (req, res) => {
   try {
     const result = await pool.query(`
@@ -133,45 +99,24 @@ app.get('/api/my-characters', authenticateToken, async (req, res) => {
     `, [req.user.id]);
     
     const formatted = result.rows.map(t => ({
-        ...t,
-        maxHp: t.max_hp,
-        maxSan: t.max_san,
-        maxWeight: t.max_weight,
-        statusEffects: t.status_effects
+        ...t, maxHp: t.max_hp, maxSan: t.max_san, maxWeight: t.max_weight, statusEffects: t.status_effects
     }));
-    
     res.json(formatted);
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Erro ao buscar personagens.' });
-  }
+  } catch (err) { res.status(500).json({ error: 'Erro ao buscar personagens.' }); }
 });
 
 // ==========================================
-// ROTAS DE JOGO (SESSIONS & GAME STATE)
+// ROTAS DE JOGO (SESSIONS)
 // ==========================================
 
 app.get('/api/sessions', authenticateToken, async (req, res) => {
   try {
-    const result = await pool.query(`
-      SELECT s.*, u.username as gm_name 
-      FROM game_sessions s
-      LEFT JOIN users u ON s.gm_id = u.id
-      ORDER BY s.name ASC
-    `);
-    
+    const result = await pool.query(`SELECT s.*, u.username as gm_name FROM game_sessions s LEFT JOIN users u ON s.gm_id = u.id ORDER BY s.name ASC`);
     const sessions = result.rows.map(row => ({
-      id: row.id,
-      name: row.name,
-      gmId: row.gm_name,
-      status: row.status,
-      mapUrl: row.map_url
+      id: row.id, name: row.name, gmId: row.gm_name, status: row.status, mapUrl: row.map_url
     }));
     res.json(sessions);
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Erro ao listar sessões' });
-  }
+  } catch (err) { res.status(500).json({ error: 'Erro ao listar sessões' }); }
 });
 
 app.get('/api/game/:sessionId', authenticateToken, async (req, res) => {
@@ -181,33 +126,39 @@ app.get('/api/game/:sessionId', authenticateToken, async (req, res) => {
     if (sessionRes.rows.length === 0) return res.status(404).json({ error: 'Mesa não encontrada' });
     const session = sessionRes.rows[0];
 
-    const tokensRes = await pool.query(`
-        SELECT t.*, u.username as owner_username 
-        FROM tokens t
-        LEFT JOIN users u ON t.owner_id = u.id
-        WHERE session_id = $1
-    `, [sessionId]);
-
+    const tokensRes = await pool.query(`SELECT t.*, u.username as owner_username FROM tokens t LEFT JOIN users u ON t.owner_id = u.id WHERE session_id = $1`, [sessionId]);
     const formattedTokens = tokensRes.rows.map(t => ({
-        ...t,
-        ownerId: t.owner_username, 
-        maxHp: t.max_hp,
-        maxSan: t.max_san,
-        maxWeight: t.max_weight,
-        statusEffects: t.status_effects
+        ...t, ownerId: t.owner_username, maxHp: t.max_hp, maxSan: t.max_san, maxWeight: t.max_weight, statusEffects: t.status_effects
     }));
 
     const wallsRes = await pool.query('SELECT * FROM walls WHERE session_id = $1', [sessionId]);
     const fogRes = await pool.query('SELECT * FROM fogs WHERE session_id = $1', [sessionId]);
     const notesRes = await pool.query('SELECT * FROM annotations WHERE session_id = $1', [sessionId]);
-    
-    const formattedNotes = notesRes.rows.map(n => ({
-        ...n, attachedItem: n.attached_item_data, isRevealed: n.is_revealed
-    }));
+    const formattedNotes = notesRes.rows.map(n => ({...n, attachedItem: n.attached_item_data, isRevealed: n.is_revealed}));
 
     const videosRes = await pool.query('SELECT * FROM library_videos WHERE session_id = $1', [sessionId]);
     const imagesRes = await pool.query('SELECT * FROM library_images WHERE session_id = $1', [sessionId]);
     const soundsRes = await pool.query('SELECT * FROM library_sounds WHERE session_id = $1', [sessionId]);
+
+    // LOAD SHARED MEDIA
+    // We assume active_image and active_video columns store JSON of the active media object
+    // Or we store ID and fetch from library. Let's assume we store the JSON for simplicity in update, 
+    // OR we fetch based on ID stored in session if we implemented relation. 
+    // Based on the SQL requested, let's just use the JSON approach stored in `active_image_data` / `active_video_data` if we added JSON columns,
+    // OR fetch by ID if we added ID columns. The previous prompt asked to add support.
+    // Let's implement fetching by ID from the session table `active_image_id` / `active_video_id`
+    
+    let activeImage = null;
+    if (session.active_image_id) {
+        const imgRes = await pool.query('SELECT * FROM library_images WHERE id = $1', [session.active_image_id]);
+        if (imgRes.rows.length > 0) activeImage = imgRes.rows[0];
+    }
+
+    let activeVideo = null;
+    if (session.active_video_id) {
+        const vidRes = await pool.query('SELECT * FROM library_videos WHERE id = $1', [session.active_video_id]);
+        if (vidRes.rows.length > 0) activeVideo = vidRes.rows[0];
+    }
 
     res.json({
         mapUrl: session.map_url,
@@ -218,128 +169,82 @@ app.get('/api/game/:sessionId', authenticateToken, async (req, res) => {
         annotations: formattedNotes,
         videos: videosRes.rows,
         images: imagesRes.rows,
-        sounds: soundsRes.rows.map(s => ({...s, key: s.shortcut_key}))
+        sounds: soundsRes.rows.map(s => ({...s, key: s.shortcut_key})),
+        activeImage: activeImage,
+        activeVideo: activeVideo
     });
 
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Erro ao carregar jogo' });
-  }
+  } catch (err) { res.status(500).json({ error: 'Erro ao carregar jogo' }); }
 });
 
-// ROTA DE SALVAMENTO (SAVE) - PERMISSÕES AJUSTADAS PARA JOGADORES
 app.post('/api/game', authenticateToken, async (req, res) => {
-    const { id: sessionId, name, status, mapUrl, tokens, walls, fog, annotations, videos, images, sounds } = req.body;
+    const { id: sessionId, name, status, mapUrl, tokens, walls, fog, annotations, videos, images, sounds, activeImage, activeVideo } = req.body;
     
     const client = await pool.connect();
     try {
         await client.query('BEGIN');
 
-        // VERIFICAÇÃO DE SEGURANÇA
-        // Se for jogador, verifica se a mesa está ABERTA antes de permitir salvar
         if (req.user.role !== 'gm') {
              const sessionCheck = await client.query('SELECT status FROM game_sessions WHERE id = $1', [sessionId]);
-             if (sessionCheck.rows.length === 0) {
+             if (sessionCheck.rows.length === 0 || sessionCheck.rows[0].status === 'closed') {
                  await client.query('ROLLBACK');
-                 return res.status(404).json({ error: 'Mesa não encontrada.' });
-             }
-             if (sessionCheck.rows[0].status === 'closed') {
-                 await client.query('ROLLBACK');
-                 return res.status(403).json({ error: 'A mesa está fechada. Apenas o Mestre pode editar.' });
+                 return res.status(403).json({ error: 'Permissão negada.' });
              }
         }
 
-        // 1. UPSERT DA SESSÃO
         const checkSess = await client.query('SELECT id FROM game_sessions WHERE id = $1', [sessionId]);
         let targetId = sessionId;
         
+        // Extract IDs for shared media
+        const activeImageId = activeImage ? activeImage.id : null;
+        const activeVideoId = activeVideo ? activeVideo.id : null;
+
         if (checkSess.rows.length > 0) {
-            // Apenas GM pode mudar status/nome/mapa, mas mantemos o update genérico para simplificar
-            // Em produção ideal, jogador só atualizaria tokens.
-            await client.query('UPDATE game_sessions SET name=$1, map_url=$2, status=$3 WHERE id=$4', 
-                [name, mapUrl, status, sessionId]);
+            await client.query('UPDATE game_sessions SET name=$1, map_url=$2, status=$3, active_image_id=$4, active_video_id=$5 WHERE id=$6', 
+                [name, mapUrl, status, activeImageId, activeVideoId, sessionId]);
         } else {
-            // Apenas GM cria mesa nova
-            if (req.user.role !== 'gm') {
-                await client.query('ROLLBACK');
-                return res.status(403).json({ error: 'Apenas GMs criam mesas.' });
-            }
-            await client.query('INSERT INTO game_sessions (id, name, gm_id, map_url, status) VALUES ($1, $2, $3, $4, $5)', 
-                [sessionId, name, req.user.id, mapUrl, status]);
+            if (req.user.role !== 'gm') { await client.query('ROLLBACK'); return res.status(403).json({ error: 'Apenas GM cria.' }); }
+            await client.query('INSERT INTO game_sessions (id, name, gm_id, map_url, status, active_image_id, active_video_id) VALUES ($1, $2, $3, $4, $5, $6, $7)', 
+                [sessionId, name, req.user.id, mapUrl, status, activeImageId, activeVideoId]);
         }
 
-        // 2. LIMPEZA COMPLETA DOS FILHOS
+        // CHILDREN CLEANUP & INSERT
         const tables = ['tokens', 'walls', 'fogs', 'annotations', 'library_videos', 'library_images', 'library_sounds'];
-        for(const tbl of tables) {
-            await client.query(`DELETE FROM ${tbl} WHERE session_id = $1`, [targetId]);
-        }
+        for(const tbl of tables) await client.query(`DELETE FROM ${tbl} WHERE session_id = $1`, [targetId]);
 
-        // 3. INSERÇÃO DOS ELEMENTOS
         for (const t of tokens) {
             let ownerUUID = null;
             if (t.ownerId) {
                 const u = await client.query('SELECT id FROM users WHERE username = $1', [t.ownerId]);
                 if (u.rows.length > 0) ownerUUID = u.rows[0].id;
             }
-            
-            const tokenId = t.id || crypto.randomUUID();
-
-            await client.query(`
-                INSERT INTO tokens (
-                    id, session_id, owner_id, name, url, role, active, x, y, size,
-                    hp, max_hp, san, max_san, max_weight, 
-                    stats, inventory, status_effects
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
-            `, [
-                tokenId, targetId, ownerUUID, t.name, t.url, t.role, t.active, t.x, t.y, t.size,
-                t.hp, t.maxHp, t.san, t.maxSan, t.maxWeight,
-                JSON.stringify(t.stats), JSON.stringify(t.inventory), JSON.stringify(t.statusEffects)
-            ]);
+            await client.query(`INSERT INTO tokens (id, session_id, owner_id, name, url, role, active, x, y, size, hp, max_hp, san, max_san, max_weight, stats, inventory, status_effects) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)`, 
+            [t.id || crypto.randomUUID(), targetId, ownerUUID, t.name, t.url, t.role, t.active, t.x, t.y, t.size, t.hp, t.maxHp, t.san, t.maxSan, t.maxWeight, JSON.stringify(t.stats), JSON.stringify(t.inventory), JSON.stringify(t.statusEffects)]);
         }
 
-        for (const w of walls) {
-            await client.query('INSERT INTO walls (id, session_id, x, y, width, height) VALUES ($1, $2, $3, $4, $5, $6)',
-            [w.id || crypto.randomUUID(), targetId, w.x, w.y, w.width, w.height]);
-        }
-
-        for (const f of fog) {
-            await client.query('INSERT INTO fogs (id, session_id, x, y, width, height) VALUES ($1, $2, $3, $4, $5, $6)',
-            [f.id || crypto.randomUUID(), targetId, f.x, f.y, f.width, f.height]);
-        }
-        
-        for (const a of annotations) {
-            await client.query('INSERT INTO annotations (id, session_id, x, y, title, content, is_revealed, attached_item_data) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)',
-            [a.id || crypto.randomUUID(), targetId, a.x, a.y, a.title, a.content, a.isRevealed, JSON.stringify(a.attachedItem)]);
-        }
-
+        for (const w of walls) await client.query('INSERT INTO walls (id, session_id, x, y, width, height) VALUES ($1, $2, $3, $4, $5, $6)', [w.id || crypto.randomUUID(), targetId, w.x, w.y, w.width, w.height]);
+        for (const f of fog) await client.query('INSERT INTO fogs (id, session_id, x, y, width, height) VALUES ($1, $2, $3, $4, $5, $6)', [f.id || crypto.randomUUID(), targetId, f.x, f.y, f.width, f.height]);
+        for (const a of annotations) await client.query('INSERT INTO annotations (id, session_id, x, y, title, content, is_revealed, attached_item_data) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)', [a.id || crypto.randomUUID(), targetId, a.x, a.y, a.title, a.content, a.isRevealed, JSON.stringify(a.attachedItem)]);
         for (const v of videos) await client.query('INSERT INTO library_videos (id, session_id, title, url) VALUES ($1, $2, $3, $4)', [v.id || crypto.randomUUID(), targetId, v.title, v.url]);
         for (const i of images) await client.query('INSERT INTO library_images (id, session_id, title, url) VALUES ($1, $2, $3, $4)', [i.id || crypto.randomUUID(), targetId, i.title, i.url]);
         for (const s of sounds) await client.query('INSERT INTO library_sounds (id, session_id, name, shortcut_key, url) VALUES ($1, $2, $3, $4, $5)', [s.id || crypto.randomUUID(), targetId, s.name, s.key, s.url]);
 
         await client.query('COMMIT');
         res.json({ success: true, sessionId: targetId });
-
     } catch (e) {
         await client.query('ROLLBACK');
         console.error("Save Error:", e);
-        res.status(500).json({ error: 'Erro ao salvar jogo: ' + e.message });
+        res.status(500).json({ error: e.message });
     } finally {
         client.release();
     }
 });
 
-// LOG IA
 app.post('/log', async (req, res) => {
     try {
-        await pool.query('INSERT INTO interaction_logs (id, username, message, response) VALUES ($1, $2, $3, $4)', 
-        [crypto.randomUUID(), req.body.usuario, req.body.mensagem, req.body.resposta]);
+        await pool.query('INSERT INTO interaction_logs (id, username, message, response) VALUES ($1, $2, $3, $4)', [crypto.randomUUID(), req.body.usuario, req.body.mensagem, req.body.resposta]);
         res.sendStatus(200);
-    } catch(e) { 
-        console.error("Log Error:", e); 
-        res.sendStatus(500); 
-    }
+    } catch(e) { res.sendStatus(500); }
 });
 
-app.listen(port, () => {
-  console.log(`Backend Aventurizer rodando na porta ${port}`);
-});
+app.listen(port, () => console.log(`Backend running on port ${port}`));
