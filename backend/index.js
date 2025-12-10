@@ -137,7 +137,16 @@ app.get('/api/game/:sessionId', authenticateToken, async (req, res) => {
     const formattedNotes = notesRes.rows.map(n => ({...n, attachedItem: n.attached_item_data, isRevealed: n.is_revealed}));
 
     const videosRes = await pool.query('SELECT * FROM library_videos WHERE session_id = $1', [sessionId]);
+    
+    // IMAGENS (Inclui owner_id)
     const imagesRes = await pool.query('SELECT * FROM library_images WHERE session_id = $1', [sessionId]);
+    const formattedImages = imagesRes.rows.map(i => ({
+        id: i.id,
+        title: i.title,
+        url: i.url,
+        ownerId: i.owner_id
+    }));
+
     const soundsRes = await pool.query('SELECT * FROM library_sounds WHERE session_id = $1', [sessionId]);
 
     res.json({
@@ -148,10 +157,8 @@ app.get('/api/game/:sessionId', authenticateToken, async (req, res) => {
         fog: fogRes.rows,
         annotations: formattedNotes,
         videos: videosRes.rows,
-        images: imagesRes.rows,
+        images: formattedImages, // Usar formatado
         sounds: soundsRes.rows.map(s => ({...s, key: s.shortcut_key})),
-        
-        // CORREÇÃO CRÍTICA: Retornar os IDs explicitamente
         activeImageId: session.active_image_id,
         activeVideoId: session.active_video_id
     });
@@ -160,7 +167,6 @@ app.get('/api/game/:sessionId', authenticateToken, async (req, res) => {
 });
 
 app.post('/api/game', authenticateToken, async (req, res) => {
-    // CORREÇÃO CRÍTICA: Aceitar activeImageId e activeVideoId diretamente do frontend
     const { id: sessionId, name, status, mapUrl, tokens, walls, fog, annotations, videos, images, sounds, activeImageId, activeVideoId } = req.body;
     
     const client = await pool.connect();
@@ -179,7 +185,6 @@ app.post('/api/game', authenticateToken, async (req, res) => {
         let targetId = sessionId;
         
         if (checkSess.rows.length > 0) {
-            // Atualiza Sessão com os IDs de Mídia
             await client.query('UPDATE game_sessions SET name=$1, map_url=$2, status=$3, active_image_id=$4, active_video_id=$5 WHERE id=$6', 
                 [name, mapUrl, status, activeImageId, activeVideoId, sessionId]);
         } else {
@@ -188,10 +193,11 @@ app.post('/api/game', authenticateToken, async (req, res) => {
                 [sessionId, name, req.user.id, mapUrl, status, activeImageId, activeVideoId]);
         }
 
-        // LIMPEZA E REINSERÇÃO DOS FILHOS
+        // LIMPEZA
         const tables = ['tokens', 'walls', 'fogs', 'annotations', 'library_videos', 'library_images', 'library_sounds'];
         for(const tbl of tables) await client.query(`DELETE FROM ${tbl} WHERE session_id = $1`, [targetId]);
 
+        // INSERÇÃO
         for (const t of tokens) {
             let ownerUUID = null;
             if (t.ownerId) {
@@ -206,7 +212,13 @@ app.post('/api/game', authenticateToken, async (req, res) => {
         for (const f of fog) await client.query('INSERT INTO fogs (id, session_id, x, y, width, height) VALUES ($1, $2, $3, $4, $5, $6)', [f.id || crypto.randomUUID(), targetId, f.x, f.y, f.width, f.height]);
         for (const a of annotations) await client.query('INSERT INTO annotations (id, session_id, x, y, title, content, is_revealed, attached_item_data) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)', [a.id || crypto.randomUUID(), targetId, a.x, a.y, a.title, a.content, a.isRevealed, JSON.stringify(a.attachedItem)]);
         for (const v of videos) await client.query('INSERT INTO library_videos (id, session_id, title, url) VALUES ($1, $2, $3, $4)', [v.id || crypto.randomUUID(), targetId, v.title, v.url]);
-        for (const i of images) await client.query('INSERT INTO library_images (id, session_id, title, url) VALUES ($1, $2, $3, $4)', [i.id || crypto.randomUUID(), targetId, i.title, i.url]);
+        
+        // IMAGENS (Inclui owner_id)
+        for (const i of images) {
+            await client.query('INSERT INTO library_images (id, session_id, title, url, owner_id) VALUES ($1, $2, $3, $4, $5)', 
+            [i.id || crypto.randomUUID(), targetId, i.title, i.url, i.ownerId || null]);
+        }
+
         for (const s of sounds) await client.query('INSERT INTO library_sounds (id, session_id, name, shortcut_key, url) VALUES ($1, $2, $3, $4, $5)', [s.id || crypto.randomUUID(), targetId, s.name, s.key, s.url]);
 
         await client.query('COMMIT');
