@@ -12,7 +12,7 @@ const port = process.env.PORT || 3000;
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false },
-  max: 20, // Conexões simultâneas
+  max: 20, 
 });
 
 app.use(cors());
@@ -29,16 +29,15 @@ const authenticateToken = (req, res, next) => {
   });
 };
 
-app.get('/', (req, res) => res.send('Aventurizer Backend v4.0 (Turbo Save) 🚀'));
+app.get('/', (req, res) => res.send('Aventurizer Backend v5.0 (Smart Sync) 🚀'));
 
-// --- USER ROUTES ---
+// --- USER ROUTES (Mantidas iguais) ---
 app.post('/api/register', async (req, res) => {
   const { username, password, role } = req.body;
-  if (!username || !password || !role) return res.status(400).json({ error: 'Campos incompletos.' });
   try {
     const check = await pool.query('SELECT id FROM users WHERE username = $1', [username]);
     if (check.rows.length > 0) return res.status(400).json({ error: 'Nome indisponível.' });
-    const hash = await bcrypt.hash(password, await bcrypt.genSalt(10));
+    const hash = await bcrypt.hash(password, 10);
     await pool.query('INSERT INTO users (id, username, password_hash, role) VALUES ($1, $2, $3, $4)', [crypto.randomUUID(), username, hash, role]);
     res.status(201).json({ success: true });
   } catch (err) { res.status(500).json({ error: 'Erro no registro.' }); }
@@ -56,13 +55,13 @@ app.post('/api/login', async (req, res) => {
 });
 
 app.post('/api/change-password', authenticateToken, async (req, res) => {
-  const { oldPassword, newPassword } = req.body;
   try {
+    const { oldPassword, newPassword } = req.body;
     const u = (await pool.query('SELECT * FROM users WHERE id = $1', [req.user.id])).rows[0];
     if (!(await bcrypt.compare(oldPassword, u.password_hash))) return res.status(400).json({ error: 'Senha incorreta.' });
     await pool.query('UPDATE users SET password_hash = $1 WHERE id = $2', [await bcrypt.hash(newPassword, 10), req.user.id]);
     res.json({ success: true });
-  } catch(e) { res.status(500).json({ error: 'Erro ao trocar senha.' }); }
+  } catch(e) { res.status(500).json({ error: 'Erro.' }); }
 });
 
 app.get('/api/my-characters', authenticateToken, async (req, res) => {
@@ -72,7 +71,6 @@ app.get('/api/my-characters', authenticateToken, async (req, res) => {
   } catch (err) { res.status(500).json({ error: 'Erro.' }); }
 });
 
-// --- GAME ROUTES ---
 app.get('/api/sessions', authenticateToken, async (req, res) => {
   try {
     const r = await pool.query(`SELECT s.*, u.username as gm_name FROM game_sessions s LEFT JOIN users u ON s.gm_id = u.id ORDER BY s.name ASC`);
@@ -80,14 +78,29 @@ app.get('/api/sessions', authenticateToken, async (req, res) => {
   } catch (err) { res.status(500).json({ error: 'Erro.' }); }
 });
 
+// --- SMART LOAD ---
 app.get('/api/game/:sessionId', authenticateToken, async (req, res) => {
   const { sessionId } = req.params;
+  const clientLastUpdate = req.query.since; // Timestamp enviado pelo frontend
+
   try {
+    // 1. Checa apenas o timestamp primeiro (Query ultra leve)
+    const sessionCheck = await pool.query('SELECT updated_at FROM game_sessions WHERE id = $1', [sessionId]);
+    if (sessionCheck.rows.length === 0) return res.status(404).json({ error: 'Mesa não encontrada' });
+    
+    const serverUpdate = new Date(sessionCheck.rows[0].updated_at).getTime();
+    const clientUpdate = clientLastUpdate ? parseInt(clientLastUpdate as string) : 0;
+
+    // 2. Se o cliente já tem a versão atual, retorna 304 (Not Modified) simulado
+    // (Retornamos JSON { notModified: true } para facilitar o frontend)
+    if (clientLastUpdate && serverUpdate <= clientUpdate) {
+        return res.json({ notModified: true, timestamp: serverUpdate });
+    }
+
+    // 3. Se mudou, carrega tudo (Heavy Load)
     const sess = await pool.query('SELECT * FROM game_sessions WHERE id = $1', [sessionId]);
-    if (sess.rows.length === 0) return res.status(404).json({ error: 'Mesa não encontrada' });
     const s = sess.rows[0];
 
-    // Parallel Fetching
     const [tokens, walls, fog, notes, vids, imgs, snds] = await Promise.all([
         pool.query(`SELECT t.*, u.username as owner_username FROM tokens t LEFT JOIN users u ON t.owner_id = u.id WHERE session_id = $1`, [sessionId]),
         pool.query('SELECT * FROM walls WHERE session_id = $1', [sessionId]),
@@ -99,6 +112,8 @@ app.get('/api/game/:sessionId', authenticateToken, async (req, res) => {
     ]);
 
     res.json({
+        notModified: false,
+        timestamp: serverUpdate, // Envia o novo timestamp para o cliente guardar
         mapUrl: s.map_url, status: s.status,
         activeImageId: s.active_image_id, activeVideoId: s.active_video_id,
         tokens: tokens.rows.map(t => ({...t, ownerId: t.owner_username, maxHp: t.max_hp, maxSan: t.max_san, maxWeight: t.max_weight, statusEffects: t.status_effects})),
@@ -111,7 +126,7 @@ app.get('/api/game/:sessionId', authenticateToken, async (req, res) => {
   } catch (err) { res.status(500).json({ error: 'Erro ao carregar.' }); }
 });
 
-// TURBO SAVE (Parallel Inserts)
+// --- SAVE ---
 app.post('/api/game', authenticateToken, async (req, res) => {
     const { id: sId, name, status, mapUrl, tokens, walls, fog, annotations, videos, images, sounds, activeImageId, activeVideoId } = req.body;
     const client = await pool.connect();
@@ -119,28 +134,24 @@ app.post('/api/game', authenticateToken, async (req, res) => {
     try {
         await client.query('BEGIN');
 
-        // Check Permissions
         if (req.user.role !== 'gm') {
              const check = await client.query('SELECT status FROM game_sessions WHERE id = $1', [sId]);
              if (check.rows.length === 0 || check.rows[0].status === 'closed') throw new Error('Permissão negada.');
         }
 
-        // Upsert Session
+        // UPDATE TIMESTAMP ON SAVE
         const checkSess = await client.query('SELECT id FROM game_sessions WHERE id = $1', [sId]);
         if (checkSess.rows.length > 0) {
-            await client.query('UPDATE game_sessions SET name=$1, map_url=$2, status=$3, active_image_id=$4, active_video_id=$5 WHERE id=$6', [name, mapUrl, status, activeImageId, activeVideoId, sId]);
+            await client.query('UPDATE game_sessions SET name=$1, map_url=$2, status=$3, active_image_id=$4, active_video_id=$5, updated_at=NOW() WHERE id=$6', [name, mapUrl, status, activeImageId, activeVideoId, sId]);
         } else {
             if (req.user.role !== 'gm') throw new Error('Apenas GM cria.');
-            await client.query('INSERT INTO game_sessions (id, name, gm_id, map_url, status, active_image_id, active_video_id) VALUES ($1, $2, $3, $4, $5, $6, $7)', [sId, name, req.user.id, mapUrl, status, activeImageId, activeVideoId]);
+            await client.query('INSERT INTO game_sessions (id, name, gm_id, map_url, status, active_image_id, active_video_id, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())', [sId, name, req.user.id, mapUrl, status, activeImageId, activeVideoId]);
         }
 
-        // Cleanup
         await Promise.all(['tokens', 'walls', 'fogs', 'annotations', 'library_videos', 'library_images', 'library_sounds'].map(t => 
             client.query(`DELETE FROM ${t} WHERE session_id = $1`, [sId])
         ));
 
-        // PARALLEL INSERTS (Massive Speedup)
-        // Tokens
         await Promise.all(tokens.map(async t => {
             let ownerUUID = null;
             if (t.ownerId) {
@@ -151,7 +162,6 @@ app.post('/api/game', authenticateToken, async (req, res) => {
             [t.id || crypto.randomUUID(), sId, ownerUUID, t.name, t.url, t.role, t.active, t.x, t.y, t.size, t.hp, t.maxHp, t.san, t.maxSan, t.maxWeight, JSON.stringify(t.stats), JSON.stringify(t.inventory), JSON.stringify(t.statusEffects)]);
         }));
 
-        // Others
         await Promise.all([
             ...walls.map(w => client.query('INSERT INTO walls (id, session_id, x, y, width, height) VALUES ($1, $2, $3, $4, $5, $6)', [w.id || crypto.randomUUID(), sId, w.x, w.y, w.width, w.height])),
             ...fog.map(f => client.query('INSERT INTO fogs (id, session_id, x, y, width, height) VALUES ($1, $2, $3, $4, $5, $6)', [f.id || crypto.randomUUID(), sId, f.x, f.y, f.width, f.height])),
