@@ -140,26 +140,6 @@ app.get('/api/game/:sessionId', authenticateToken, async (req, res) => {
     const imagesRes = await pool.query('SELECT * FROM library_images WHERE session_id = $1', [sessionId]);
     const soundsRes = await pool.query('SELECT * FROM library_sounds WHERE session_id = $1', [sessionId]);
 
-    // LOAD SHARED MEDIA
-    // We assume active_image and active_video columns store JSON of the active media object
-    // Or we store ID and fetch from library. Let's assume we store the JSON for simplicity in update, 
-    // OR we fetch based on ID stored in session if we implemented relation. 
-    // Based on the SQL requested, let's just use the JSON approach stored in `active_image_data` / `active_video_data` if we added JSON columns,
-    // OR fetch by ID if we added ID columns. The previous prompt asked to add support.
-    // Let's implement fetching by ID from the session table `active_image_id` / `active_video_id`
-    
-    let activeImage = null;
-    if (session.active_image_id) {
-        const imgRes = await pool.query('SELECT * FROM library_images WHERE id = $1', [session.active_image_id]);
-        if (imgRes.rows.length > 0) activeImage = imgRes.rows[0];
-    }
-
-    let activeVideo = null;
-    if (session.active_video_id) {
-        const vidRes = await pool.query('SELECT * FROM library_videos WHERE id = $1', [session.active_video_id]);
-        if (vidRes.rows.length > 0) activeVideo = vidRes.rows[0];
-    }
-
     res.json({
         mapUrl: session.map_url,
         status: session.status,
@@ -170,15 +150,18 @@ app.get('/api/game/:sessionId', authenticateToken, async (req, res) => {
         videos: videosRes.rows,
         images: imagesRes.rows,
         sounds: soundsRes.rows.map(s => ({...s, key: s.shortcut_key})),
-        activeImage: activeImage,
-        activeVideo: activeVideo
+        
+        // CORREÇÃO CRÍTICA: Retornar os IDs explicitamente
+        activeImageId: session.active_image_id,
+        activeVideoId: session.active_video_id
     });
 
   } catch (err) { res.status(500).json({ error: 'Erro ao carregar jogo' }); }
 });
 
 app.post('/api/game', authenticateToken, async (req, res) => {
-    const { id: sessionId, name, status, mapUrl, tokens, walls, fog, annotations, videos, images, sounds, activeImage, activeVideo } = req.body;
+    // CORREÇÃO CRÍTICA: Aceitar activeImageId e activeVideoId diretamente do frontend
+    const { id: sessionId, name, status, mapUrl, tokens, walls, fog, annotations, videos, images, sounds, activeImageId, activeVideoId } = req.body;
     
     const client = await pool.connect();
     try {
@@ -195,11 +178,8 @@ app.post('/api/game', authenticateToken, async (req, res) => {
         const checkSess = await client.query('SELECT id FROM game_sessions WHERE id = $1', [sessionId]);
         let targetId = sessionId;
         
-        // Extract IDs for shared media
-        const activeImageId = activeImage ? activeImage.id : null;
-        const activeVideoId = activeVideo ? activeVideo.id : null;
-
         if (checkSess.rows.length > 0) {
+            // Atualiza Sessão com os IDs de Mídia
             await client.query('UPDATE game_sessions SET name=$1, map_url=$2, status=$3, active_image_id=$4, active_video_id=$5 WHERE id=$6', 
                 [name, mapUrl, status, activeImageId, activeVideoId, sessionId]);
         } else {
@@ -208,7 +188,7 @@ app.post('/api/game', authenticateToken, async (req, res) => {
                 [sessionId, name, req.user.id, mapUrl, status, activeImageId, activeVideoId]);
         }
 
-        // CHILDREN CLEANUP & INSERT
+        // LIMPEZA E REINSERÇÃO DOS FILHOS
         const tables = ['tokens', 'walls', 'fogs', 'annotations', 'library_videos', 'library_images', 'library_sounds'];
         for(const tbl of tables) await client.query(`DELETE FROM ${tbl} WHERE session_id = $1`, [targetId]);
 
