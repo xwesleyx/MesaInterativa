@@ -12,7 +12,10 @@ const port = process.env.PORT || 3000;
 // Configuração do Banco de Dados
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false }
+  ssl: { rejectUnauthorized: false },
+  max: 20, // Aumenta conexões simultâneas para suportar paralelismo
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 2000,
 });
 
 app.use(cors());
@@ -22,7 +25,6 @@ app.use(express.json({ limit: '50mb' }));
 const authenticateToken = (req, res, next) => {
   const authHeader = req.headers['authorization'];
   const token = authHeader && authHeader.split(' ')[1];
-  
   if (!token) return res.sendStatus(401);
 
   jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
@@ -32,30 +34,21 @@ const authenticateToken = (req, res, next) => {
   });
 };
 
-app.get('/', (req, res) => res.send('Aventurizer RPG Backend Online 🚀'));
+app.get('/', (req, res) => res.send('Aventurizer Backend v3.1 (Optimized) 🚀'));
 
-// ==========================================
-// ROTAS DE USUÁRIO
-// ==========================================
+// --- ROTAS DE USUÁRIO ---
 
 app.post('/api/register', async (req, res) => {
   const { username, password, role } = req.body;
   if (!username || !password || !role) return res.status(400).json({ error: 'Preencha todos os campos.' });
-  if (role !== 'gm' && role !== 'player') return res.status(400).json({ error: 'Papel inválido.' });
-
   try {
     const userCheck = await pool.query('SELECT id FROM users WHERE username = $1', [username]);
     if (userCheck.rows.length > 0) return res.status(400).json({ error: 'Nome indisponível.' });
-
     const salt = await bcrypt.genSalt(10);
     const hash = await bcrypt.hash(password, salt);
-    const newId = crypto.randomUUID();
-
-    await pool.query('INSERT INTO users (id, username, password_hash, role) VALUES ($1, $2, $3, $4)', [newId, username, hash, role]);
+    await pool.query('INSERT INTO users (id, username, password_hash, role) VALUES ($1, $2, $3, $4)', [crypto.randomUUID(), username, hash, role]);
     res.status(201).json({ success: true });
-  } catch (err) {
-    res.status(500).json({ error: 'Erro ao criar usuário.' });
-  }
+  } catch (err) { res.status(500).json({ error: 'Erro ao criar usuário.' }); }
 });
 
 app.post('/api/login', async (req, res) => {
@@ -63,27 +56,20 @@ app.post('/api/login', async (req, res) => {
   try {
     const result = await pool.query('SELECT * FROM users WHERE username = $1', [username]);
     const user = result.rows[0];
-    if (!user) return res.status(400).json({ error: 'Usuário não encontrado' });
-
-    const validPassword = await bcrypt.compare(password, user.password_hash);
-    if (!validPassword) return res.status(400).json({ error: 'Senha incorreta' });
-
+    if (!user || !(await bcrypt.compare(password, user.password_hash))) {
+        return res.status(400).json({ error: 'Credenciais inválidas.' });
+    }
     const token = jwt.sign({ id: user.id, username: user.username, role: user.role }, process.env.JWT_SECRET, { expiresIn: '24h' });
     res.json({ token, user: { name: user.username, role: user.role } });
-  } catch (err) {
-    res.status(500).json({ error: 'Erro interno' });
-  }
+  } catch (err) { res.status(500).json({ error: 'Erro interno' }); }
 });
 
 app.post('/api/change-password', authenticateToken, async (req, res) => {
   const { oldPassword, newPassword } = req.body;
   try {
     const userRes = await pool.query('SELECT * FROM users WHERE id = $1', [req.user.id]);
-    const valid = await bcrypt.compare(oldPassword, userRes.rows[0].password_hash);
-    if (!valid) return res.status(400).json({ error: 'Senha incorreta' });
-
-    const salt = await bcrypt.genSalt(10);
-    const hash = await bcrypt.hash(newPassword, salt);
+    if (!(await bcrypt.compare(oldPassword, userRes.rows[0].password_hash))) return res.status(400).json({ error: 'Senha incorreta' });
+    const hash = await bcrypt.hash(newPassword, await bcrypt.genSalt(10));
     await pool.query('UPDATE users SET password_hash = $1 WHERE id = $2', [hash, req.user.id]);
     res.json({ success: true });
   } catch(e) { res.status(500).json({ error: 'Erro ao trocar senha' }); }
@@ -91,63 +77,48 @@ app.post('/api/change-password', authenticateToken, async (req, res) => {
 
 app.get('/api/my-characters', authenticateToken, async (req, res) => {
   try {
-    const result = await pool.query(`
-      SELECT t.*, s.name as session_name 
-      FROM tokens t
-      JOIN game_sessions s ON t.session_id = s.id
-      WHERE t.owner_id = $1
-    `, [req.user.id]);
-    
-    const formatted = result.rows.map(t => ({
-        ...t, maxHp: t.max_hp, maxSan: t.max_san, maxWeight: t.max_weight, statusEffects: t.status_effects
-    }));
+    const result = await pool.query(`SELECT t.*, s.name as session_name FROM tokens t JOIN game_sessions s ON t.session_id = s.id WHERE t.owner_id = $1`, [req.user.id]);
+    const formatted = result.rows.map(t => ({...t, maxHp: t.max_hp, maxSan: t.max_san, maxWeight: t.max_weight, statusEffects: t.status_effects }));
     res.json(formatted);
   } catch (err) { res.status(500).json({ error: 'Erro ao buscar personagens.' }); }
 });
 
-// ==========================================
-// ROTAS DE JOGO (SESSIONS)
-// ==========================================
+// --- ROTAS DE JOGO (SESSIONS) ---
 
 app.get('/api/sessions', authenticateToken, async (req, res) => {
   try {
     const result = await pool.query(`SELECT s.*, u.username as gm_name FROM game_sessions s LEFT JOIN users u ON s.gm_id = u.id ORDER BY s.name ASC`);
-    const sessions = result.rows.map(row => ({
-      id: row.id, name: row.name, gmId: row.gm_name, status: row.status, mapUrl: row.map_url
-    }));
+    const sessions = result.rows.map(row => ({ id: row.id, name: row.name, gmId: row.gm_name, status: row.status, mapUrl: row.map_url }));
     res.json(sessions);
   } catch (err) { res.status(500).json({ error: 'Erro ao listar sessões' }); }
 });
 
+// GET GAME - OTIMIZADO COM PROMISE.ALL (PARALELISMO)
 app.get('/api/game/:sessionId', authenticateToken, async (req, res) => {
   const { sessionId } = req.params;
   try {
+    // 1. Busca a Sessão primeiro para validar existência
     const sessionRes = await pool.query('SELECT * FROM game_sessions WHERE id = $1', [sessionId]);
     if (sessionRes.rows.length === 0) return res.status(404).json({ error: 'Mesa não encontrada' });
     const session = sessionRes.rows[0];
 
-    const tokensRes = await pool.query(`SELECT t.*, u.username as owner_username FROM tokens t LEFT JOIN users u ON t.owner_id = u.id WHERE session_id = $1`, [sessionId]);
+    // 2. Executa TODAS as outras queries em paralelo para performance máxima
+    const [tokensRes, wallsRes, fogRes, notesRes, videosRes, imagesRes, soundsRes] = await Promise.all([
+        pool.query(`SELECT t.*, u.username as owner_username FROM tokens t LEFT JOIN users u ON t.owner_id = u.id WHERE session_id = $1`, [sessionId]),
+        pool.query('SELECT * FROM walls WHERE session_id = $1', [sessionId]),
+        pool.query('SELECT * FROM fogs WHERE session_id = $1', [sessionId]),
+        pool.query('SELECT * FROM annotations WHERE session_id = $1', [sessionId]),
+        pool.query('SELECT * FROM library_videos WHERE session_id = $1', [sessionId]),
+        pool.query('SELECT * FROM library_images WHERE session_id = $1', [sessionId]),
+        pool.query('SELECT * FROM library_sounds WHERE session_id = $1', [sessionId])
+    ]);
+
+    // 3. Formatação
     const formattedTokens = tokensRes.rows.map(t => ({
         ...t, ownerId: t.owner_username, maxHp: t.max_hp, maxSan: t.max_san, maxWeight: t.max_weight, statusEffects: t.status_effects
     }));
-
-    const wallsRes = await pool.query('SELECT * FROM walls WHERE session_id = $1', [sessionId]);
-    const fogRes = await pool.query('SELECT * FROM fogs WHERE session_id = $1', [sessionId]);
-    const notesRes = await pool.query('SELECT * FROM annotations WHERE session_id = $1', [sessionId]);
     const formattedNotes = notesRes.rows.map(n => ({...n, attachedItem: n.attached_item_data, isRevealed: n.is_revealed}));
-
-    const videosRes = await pool.query('SELECT * FROM library_videos WHERE session_id = $1', [sessionId]);
-    
-    // IMAGENS (Inclui owner_id)
-    const imagesRes = await pool.query('SELECT * FROM library_images WHERE session_id = $1', [sessionId]);
-    const formattedImages = imagesRes.rows.map(i => ({
-        id: i.id,
-        title: i.title,
-        url: i.url,
-        ownerId: i.owner_id
-    }));
-
-    const soundsRes = await pool.query('SELECT * FROM library_sounds WHERE session_id = $1', [sessionId]);
+    const formattedImages = imagesRes.rows.map(i => ({ id: i.id, title: i.title, url: i.url, ownerId: i.owner_id }));
 
     res.json({
         mapUrl: session.map_url,
@@ -157,13 +128,16 @@ app.get('/api/game/:sessionId', authenticateToken, async (req, res) => {
         fog: fogRes.rows,
         annotations: formattedNotes,
         videos: videosRes.rows,
-        images: formattedImages, // Usar formatado
+        images: formattedImages,
         sounds: soundsRes.rows.map(s => ({...s, key: s.shortcut_key})),
         activeImageId: session.active_image_id,
         activeVideoId: session.active_video_id
     });
 
-  } catch (err) { res.status(500).json({ error: 'Erro ao carregar jogo' }); }
+  } catch (err) { 
+      console.error(err);
+      res.status(500).json({ error: 'Erro ao carregar jogo' }); 
+  }
 });
 
 app.post('/api/game', authenticateToken, async (req, res) => {
@@ -193,11 +167,9 @@ app.post('/api/game', authenticateToken, async (req, res) => {
                 [sessionId, name, req.user.id, mapUrl, status, activeImageId, activeVideoId]);
         }
 
-        // LIMPEZA
         const tables = ['tokens', 'walls', 'fogs', 'annotations', 'library_videos', 'library_images', 'library_sounds'];
         for(const tbl of tables) await client.query(`DELETE FROM ${tbl} WHERE session_id = $1`, [targetId]);
 
-        // INSERÇÃO
         for (const t of tokens) {
             let ownerUUID = null;
             if (t.ownerId) {
@@ -212,13 +184,7 @@ app.post('/api/game', authenticateToken, async (req, res) => {
         for (const f of fog) await client.query('INSERT INTO fogs (id, session_id, x, y, width, height) VALUES ($1, $2, $3, $4, $5, $6)', [f.id || crypto.randomUUID(), targetId, f.x, f.y, f.width, f.height]);
         for (const a of annotations) await client.query('INSERT INTO annotations (id, session_id, x, y, title, content, is_revealed, attached_item_data) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)', [a.id || crypto.randomUUID(), targetId, a.x, a.y, a.title, a.content, a.isRevealed, JSON.stringify(a.attachedItem)]);
         for (const v of videos) await client.query('INSERT INTO library_videos (id, session_id, title, url) VALUES ($1, $2, $3, $4)', [v.id || crypto.randomUUID(), targetId, v.title, v.url]);
-        
-        // IMAGENS (Inclui owner_id)
-        for (const i of images) {
-            await client.query('INSERT INTO library_images (id, session_id, title, url, owner_id) VALUES ($1, $2, $3, $4, $5)', 
-            [i.id || crypto.randomUUID(), targetId, i.title, i.url, i.ownerId || null]);
-        }
-
+        for (const i of images) await client.query('INSERT INTO library_images (id, session_id, title, url, owner_id) VALUES ($1, $2, $3, $4, $5)', [i.id || crypto.randomUUID(), targetId, i.title, i.url, i.ownerId || null]);
         for (const s of sounds) await client.query('INSERT INTO library_sounds (id, session_id, name, shortcut_key, url) VALUES ($1, $2, $3, $4, $5)', [s.id || crypto.randomUUID(), targetId, s.name, s.key, s.url]);
 
         await client.query('COMMIT');
