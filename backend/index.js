@@ -8,14 +8,14 @@ const jwt = require('jsonwebtoken');
 const app = express();
 const PORT = process.env.PORT || 10000;
 
-// Configuração do CORS
+// Configuração Básica
 app.use(cors());
-app.use(express.json({ limit: '50mb' }));
+app.use(express.json({ limit: '50mb' })); // Limite alto para imagens
 
-// Conexão com Banco de Dados
+// Conexão DB
 const pool = new Pool({
     connectionString: process.env.DATABASE_URL,
-    ssl: { rejectUnauthorized: false }
+    ssl: { rejectUnauthorized: false } // Necessário para Render/Neon/Supabase
 });
 
 // Middleware de Autenticação
@@ -32,9 +32,9 @@ const authenticateToken = (req, res, next) => {
     });
 };
 
-// ==========================================
-// ROTAS DE AUTENTICAÇÃO
-// ==========================================
+// ==================================================
+// 1. AUTENTICAÇÃO
+// ==================================================
 
 // Registro
 app.post('/api/register', async (req, res) => {
@@ -81,7 +81,7 @@ app.post('/api/login', async (req, res) => {
     }
 });
 
-// Alterar Senha (Próprio Usuário)
+// Alterar Própria Senha
 app.post('/api/change-password', authenticateToken, async (req, res) => {
     const { oldPassword, newPassword } = req.body;
     try {
@@ -101,14 +101,14 @@ app.post('/api/change-password', authenticateToken, async (req, res) => {
     }
 });
 
-// ==========================================
-// ROTAS DE ADMINISTRAÇÃO (USUÁRIOS)
-// ==========================================
+// ==================================================
+// 2. ADMINISTRAÇÃO (SUPER ADMIN / MESTRE)
+// ==================================================
 
-// Listar Usuários (Apenas Mestre)
+// Listar Todos Usuários
 app.get('/api/users', authenticateToken, async (req, res) => {
     if (req.user.name.toLowerCase() !== 'mestre') {
-        return res.status(403).json({ error: 'Acesso negado. Apenas o Mestre Supremo pode ver usuários.' });
+        return res.status(403).json({ error: 'Acesso negado. Apenas o Mestre pode ver usuários.' });
     }
 
     try {
@@ -120,7 +120,7 @@ app.get('/api/users', authenticateToken, async (req, res) => {
     }
 });
 
-// Admin Reset Password (Mestre define nova senha para usuário)
+// Mestre redefine senha de usuário
 app.put('/api/users/:username/reset', authenticateToken, async (req, res) => {
     const { username } = req.params;
     const { newPassword } = req.body;
@@ -143,7 +143,7 @@ app.put('/api/users/:username/reset', authenticateToken, async (req, res) => {
     }
 });
 
-// Deletar Usuário e Dados (Apenas Mestre)
+// Mestre deleta usuário (e suas mesas)
 app.delete('/api/users/:username', authenticateToken, async (req, res) => {
     const { username } = req.params;
 
@@ -169,11 +169,11 @@ app.delete('/api/users/:username', authenticateToken, async (req, res) => {
     }
 });
 
-// ==========================================
-// ROTAS DE JOGO (SESSÕES)
-// ==========================================
+// ==================================================
+// 3. GAME SESSIONS (MESAS)
+// ==================================================
 
-// Listar Sessões
+// Listar Mesas
 app.get('/api/sessions', authenticateToken, async (req, res) => {
     try {
         const result = await pool.query(`
@@ -188,7 +188,7 @@ app.get('/api/sessions', authenticateToken, async (req, res) => {
     }
 });
 
-// Carregar Jogo Completo
+// Carregar Mesa
 app.get('/api/game/:id', authenticateToken, async (req, res) => {
     const { id } = req.params;
     try {
@@ -204,6 +204,7 @@ app.get('/api/game/:id', authenticateToken, async (req, res) => {
             gmId: session.gm_id,
             status: session.status,
             mapUrl: session.map_url,
+            // Fallbacks para evitar null
             tokens: session.game_state.tokens || [],
             walls: session.game_state.walls || [],
             fog: session.game_state.fog || [],
@@ -221,7 +222,7 @@ app.get('/api/game/:id', authenticateToken, async (req, res) => {
     }
 });
 
-// Salvar/Criar Jogo
+// Criar ou Salvar Mesa
 app.post('/api/game', authenticateToken, async (req, res) => {
     const { id, name, status, mapUrl, tokens, walls, fog, annotations, videos, images, sounds, activeImageId, activeVideoId } = req.body;
     const gmId = req.user.name;
@@ -234,6 +235,7 @@ app.post('/api/game', authenticateToken, async (req, res) => {
         const check = await pool.query('SELECT gm_id FROM game_sessions WHERE id = $1', [id]);
 
         if (check.rows.length > 0) {
+            // Atualizar
             await pool.query(`
                 UPDATE game_sessions 
                 SET name = COALESCE($1, name), 
@@ -246,6 +248,7 @@ app.post('/api/game', authenticateToken, async (req, res) => {
             
             res.json({ message: "Jogo salvo", sessionId: id });
         } else {
+            // Criar
             await pool.query(`
                 INSERT INTO game_sessions (id, name, gm_id, status, map_url, game_state)
                 VALUES ($1, $2, $3, $4, $5, $6)
@@ -259,7 +262,7 @@ app.post('/api/game', authenticateToken, async (req, res) => {
     }
 });
 
-// Deletar Jogo (Mestre e Dono)
+// Deletar Mesa (Dono ou Mestre)
 app.delete('/api/game/:id', authenticateToken, async (req, res) => {
     const { id } = req.params;
     const username = req.user.name;
@@ -273,11 +276,12 @@ app.delete('/api/game/:id', authenticateToken, async (req, res) => {
 
         const owner = result.rows[0].gm_id;
 
+        // Permite se for o DONO ou o MESTRE
         if (username.toLowerCase() === 'mestre' || owner.toLowerCase() === username.toLowerCase()) {
             await pool.query('DELETE FROM game_sessions WHERE id = $1', [id]);
             res.json({ message: 'Sessão excluída com sucesso' });
         } else {
-            res.status(403).json({ error: 'Apenas o Mestre criador pode excluir esta mesa.' });
+            res.status(403).json({ error: 'Apenas o criador pode excluir esta mesa.' });
         }
     } catch (err) {
         console.error(err);
@@ -285,6 +289,11 @@ app.delete('/api/game/:id', authenticateToken, async (req, res) => {
     }
 });
 
+// ==================================================
+// 4. HELPERS
+// ==================================================
+
+// Buscar Personagens do Usuário (em todas as mesas)
 app.get('/api/my-characters', authenticateToken, async (req, res) => {
     const username = req.user.name;
     try {
@@ -310,6 +319,7 @@ app.get('/api/my-characters', authenticateToken, async (req, res) => {
     }
 });
 
+// Log de IA
 app.post('/log', async (req, res) => {
     const { usuario, mensagem, resposta } = req.body;
     try {
