@@ -10,12 +10,12 @@ const PORT = process.env.PORT || 10000;
 
 // Configuração do CORS
 app.use(cors());
-app.use(express.json({ limit: '50mb' })); // Limite alto para upload de mapas/imagens em base64
+app.use(express.json({ limit: '50mb' }));
 
 // Conexão com Banco de Dados
 const pool = new Pool({
     connectionString: process.env.DATABASE_URL,
-    ssl: { rejectUnauthorized: false } // Necessário para maioria dos hosts em nuvem (Render, Neon)
+    ssl: { rejectUnauthorized: false }
 });
 
 // Middleware de Autenticação
@@ -69,7 +69,7 @@ app.post('/api/login', async (req, res) => {
             const token = jwt.sign(
                 { id: user.id, name: user.username, role: user.role },
                 process.env.JWT_SECRET || 'secret_key_dev',
-                { expiresIn: '30d' } // Token dura 30 dias para evitar logins constantes
+                { expiresIn: '30d' }
             );
             res.json({ token, user: { name: user.username, role: user.role } });
         } else {
@@ -81,7 +81,7 @@ app.post('/api/login', async (req, res) => {
     }
 });
 
-// Alterar Senha
+// Alterar Senha (Próprio Usuário)
 app.post('/api/change-password', authenticateToken, async (req, res) => {
     const { oldPassword, newPassword } = req.body;
     try {
@@ -120,7 +120,30 @@ app.get('/api/users', authenticateToken, async (req, res) => {
     }
 });
 
-// Deletar Usuário (Apenas Mestre)
+// Admin Reset Password (Mestre define nova senha para usuário)
+app.put('/api/users/:username/reset', authenticateToken, async (req, res) => {
+    const { username } = req.params;
+    const { newPassword } = req.body;
+
+    if (req.user.name.toLowerCase() !== 'mestre') {
+        return res.status(403).json({ error: 'Acesso negado.' });
+    }
+    
+    if (!newPassword || newPassword.length < 3) {
+        return res.status(400).json({ error: 'Senha muito curta.' });
+    }
+
+    try {
+        const hashedPassword = await bcrypt.hash(newPassword, 10);
+        await pool.query('UPDATE users SET password = $1 WHERE username = $2', [hashedPassword, username]);
+        res.json({ message: `Senha de ${username} redefinida com sucesso.` });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'Erro ao redefinir senha.' });
+    }
+});
+
+// Deletar Usuário e Dados (Apenas Mestre)
 app.delete('/api/users/:username', authenticateToken, async (req, res) => {
     const { username } = req.params;
 
@@ -133,13 +156,13 @@ app.delete('/api/users/:username', authenticateToken, async (req, res) => {
     }
 
     try {
-        // Deleta sessões do usuário primeiro para manter integridade (ou set null dependendo da lógica)
+        // 1. Deleta sessões onde o usuário é o GM
         await pool.query('DELETE FROM game_sessions WHERE gm_id = $1', [username]);
         
-        // Deleta o usuário
+        // 2. Deleta o usuário
         await pool.query('DELETE FROM users WHERE username = $1', [username]);
         
-        res.json({ message: `Usuário ${username} eliminado da existência.` });
+        res.json({ message: `Usuário ${username} e todas as suas mesas foram eliminados.` });
     } catch (err) {
         console.error(err);
         res.status(500).json({ error: 'Erro ao deletar usuário' });
@@ -153,7 +176,6 @@ app.delete('/api/users/:username', authenticateToken, async (req, res) => {
 // Listar Sessões
 app.get('/api/sessions', authenticateToken, async (req, res) => {
     try {
-        // Retorna metadados básicos das sessões
         const result = await pool.query(`
             SELECT id, name, gm_id as "gmId", status, map_url as "mapUrl", created_at 
             FROM game_sessions 
@@ -175,7 +197,6 @@ app.get('/api/game/:id', authenticateToken, async (req, res) => {
 
         const session = result.rows[0];
         
-        // Mescla metadados com o estado do jogo salvo no JSONB
         const fullState = {
             ...session.game_state,
             id: session.id,
@@ -183,7 +204,6 @@ app.get('/api/game/:id', authenticateToken, async (req, res) => {
             gmId: session.gm_id,
             status: session.status,
             mapUrl: session.map_url,
-            // Fallback para arrays vazios se o JSONB estiver incompleto
             tokens: session.game_state.tokens || [],
             walls: session.game_state.walls || [],
             fog: session.game_state.fog || [],
@@ -206,21 +226,14 @@ app.post('/api/game', authenticateToken, async (req, res) => {
     const { id, name, status, mapUrl, tokens, walls, fog, annotations, videos, images, sounds, activeImageId, activeVideoId } = req.body;
     const gmId = req.user.name;
 
-    // Monta o objeto JSONB para salvar
     const gameState = {
         tokens, walls, fog, annotations, videos, images, sounds, activeImageId, activeVideoId
     };
 
     try {
-        // Verifica se a sessão já existe
         const check = await pool.query('SELECT gm_id FROM game_sessions WHERE id = $1', [id]);
 
         if (check.rows.length > 0) {
-            // Sessão existe: Atualizar
-            // Lógica de permissão: Apenas o dono ou o Mestre podem salvar, 
-            // MAS jogadores podem salvar alterações menores (movimento) se a mesa estiver aberta.
-            // Para simplicidade, permitimos update se o ID bater, o front controla a lógica de quem mexe no que.
-            
             await pool.query(`
                 UPDATE game_sessions 
                 SET name = COALESCE($1, name), 
@@ -233,7 +246,6 @@ app.post('/api/game', authenticateToken, async (req, res) => {
             
             res.json({ message: "Jogo salvo", sessionId: id });
         } else {
-            // Nova Sessão
             await pool.query(`
                 INSERT INTO game_sessions (id, name, gm_id, status, map_url, game_state)
                 VALUES ($1, $2, $3, $4, $5, $6)
@@ -247,13 +259,12 @@ app.post('/api/game', authenticateToken, async (req, res) => {
     }
 });
 
-// Deletar Jogo (ATUALIZADO PARA SUPORTE AO MESTRE)
+// Deletar Jogo (Mestre e Dono)
 app.delete('/api/game/:id', authenticateToken, async (req, res) => {
     const { id } = req.params;
     const username = req.user.name;
 
     try {
-        // Busca quem é o dono da mesa
         const result = await pool.query('SELECT gm_id FROM game_sessions WHERE id = $1', [id]);
         
         if (result.rows.length === 0) {
@@ -262,9 +273,6 @@ app.delete('/api/game/:id', authenticateToken, async (req, res) => {
 
         const owner = result.rows[0].gm_id;
 
-        // VERIFICAÇÃO DE PERMISSÃO:
-        // 1. É o dono da mesa (case-insensitive)
-        // 2. É o usuário "mestre" (Super Admin)
         if (username.toLowerCase() === 'mestre' || owner.toLowerCase() === username.toLowerCase()) {
             await pool.query('DELETE FROM game_sessions WHERE id = $1', [id]);
             res.json({ message: 'Sessão excluída com sucesso' });
@@ -277,25 +285,9 @@ app.delete('/api/game/:id', authenticateToken, async (req, res) => {
     }
 });
 
-// Rota de Compatibilidade (caso o frontend antigo chame /sessions/:id)
-app.delete('/api/sessions/:id', authenticateToken, async (req, res) => {
-    // Redireciona a lógica para a mesma função acima se fosse um middleware, 
-    // mas aqui repetimos a lógica por simplicidade ou fazemos um redirect interno.
-    // Vamos apenas retornar 404 para forçar o front a usar a rota nova, 
-    // ou copiar a lógica acima se necessário. O front fornecido já usa /api/game/:id.
-    res.status(404).json({ error: "Endpoint deprecated. Use DELETE /api/game/:id" });
-});
-
-// ==========================================
-// ROTAS AUXILIARES
-// ==========================================
-
-// Buscar "Meus Personagens" (Procura tokens onde ownerId == usuário logado em todas as sessões)
 app.get('/api/my-characters', authenticateToken, async (req, res) => {
     const username = req.user.name;
     try {
-        // Query complexa de JSONB para extrair tokens de dentro dos objetos de sessão
-        // PostgreSql permite expandir arrays JSON
         const query = `
             SELECT 
                 token->>'id' as id,
@@ -318,7 +310,6 @@ app.get('/api/my-characters', authenticateToken, async (req, res) => {
     }
 });
 
-// Log de Interação (Para debug da IA)
 app.post('/log', async (req, res) => {
     const { usuario, mensagem, resposta } = req.body;
     try {
@@ -328,7 +319,6 @@ app.post('/log', async (req, res) => {
         );
         res.sendStatus(200);
     } catch (err) {
-        // Não falhar o app se o log falhar
         console.error("Log error", err);
         res.sendStatus(200); 
     }
