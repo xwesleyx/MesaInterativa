@@ -9,7 +9,7 @@ const crypto = require('crypto');
 const app = express();
 const port = process.env.PORT || 3000;
 
-// Verificação de segurança da URL do banco
+// Se a DATABASE_URL não estiver definida, vai dar erro
 if (!process.env.DATABASE_URL) {
   console.error("FATAL: DATABASE_URL não definida nas variáveis de ambiente.");
   process.exit(1);
@@ -36,7 +36,7 @@ const authenticateToken = (req, res, next) => {
   });
 };
 
-app.get('/', (req, res) => res.send('Aventurizer RPG Backend is Running! 🚀'));
+app.get('/', (req, res) => res.send('RPG Backend is Running! 🚀'));
 
 // ==================================================================
 // ROTAS DE USUÁRIO (AUTH)
@@ -92,7 +92,7 @@ app.get('/api/sessions', authenticateToken, async (req, res) => {
   } catch (err) { res.status(500).json({ error: 'Erro ao buscar mesas.' }); }
 });
 
-// --- ROTA DE EXCLUSÃO DE MESA (NOVO) ---
+// --- ROTA DE EXCLUSÃO DE MESA ---
 app.delete('/api/sessions/:id', authenticateToken, async (req, res) => {
     const { id } = req.params;
     const client = await pool.connect();
@@ -209,7 +209,7 @@ app.post('/api/game', authenticateToken, async (req, res) => {
             ...walls.map(w => client.query('INSERT INTO walls (id, session_id, x, y, width, height) VALUES ($1, $2, $3, $4, $5, $6)', [w.id, sId, w.x, w.y, w.width, w.height])),
             ...fog.map(f => client.query('INSERT INTO fogs (id, session_id, x, y, width, height) VALUES ($1, $2, $3, $4, $5, $6)', [f.id, sId, f.x, f.y, f.width, f.height])),
             ...annotations.map(a => client.query('INSERT INTO annotations (id, session_id, x, y, title, content, is_revealed, attached_item_data) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)', [a.id, sId, a.x, a.y, a.title, a.content, a.isRevealed, JSON.stringify(a.attachedItem)])),
-            ...videos.map(v => client.query('INSERT INTO library_videos (id, session_id, title, url) VALUES ($1, $2, $3, $4)', [v.id, sId, v.title, v.url])),
+            ...videos.map(v => client.query('INSERT INTO library_videos (id, session_id, title, url) VALUES ($1, $2, $3, $4, $5)', [v.id, sId, v.title, v.url])),
             ...images.map(i => client.query('INSERT INTO library_images (id, session_id, title, url, owner_id) VALUES ($1, $2, $3, $4, $5)', [i.id, sId, i.title, i.url, i.ownerId || null])),
             ...sounds.map(s => client.query('INSERT INTO library_sounds (id, session_id, name, shortcut_key, url) VALUES ($1, $2, $3, $4, $5)', [s.id, sId, s.name, s.key, s.url]))
         ]);
