@@ -9,7 +9,7 @@ const crypto = require('crypto');
 const app = express();
 const port = process.env.PORT || 3000;
 
-// Se a DATABASE_URL não estiver definida, vai dar erro
+// Verificação de segurança da URL do banco
 if (!process.env.DATABASE_URL) {
   console.error("FATAL: DATABASE_URL não definida nas variáveis de ambiente.");
   process.exit(1);
@@ -17,7 +17,7 @@ if (!process.env.DATABASE_URL) {
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false }, // Necessário para Render
+  ssl: { rejectUnauthorized: false }, // Necessário para Render/Neon
   max: 20,
 });
 
@@ -36,9 +36,12 @@ const authenticateToken = (req, res, next) => {
   });
 };
 
-app.get('/', (req, res) => res.send('RPG Backend is Running! 🚀'));
+app.get('/', (req, res) => res.send('Aventurizer RPG Backend is Running! 🚀'));
 
-// --- AUTH ---
+// ==================================================================
+// ROTAS DE USUÁRIO (AUTH)
+// ==================================================================
+
 app.post('/api/register', async (req, res) => {
   const { username, password, role } = req.body;
   try {
@@ -61,7 +64,27 @@ app.post('/api/login', async (req, res) => {
   } catch (err) { console.error(err); res.status(500).json({ error: 'Erro interno.' }); }
 });
 
-// --- SESSIONS ---
+app.post('/api/change-password', authenticateToken, async (req, res) => {
+  try {
+    const { oldPassword, newPassword } = req.body;
+    const u = (await pool.query('SELECT * FROM users WHERE id = $1', [req.user.id])).rows[0];
+    if (!(await bcrypt.compare(oldPassword, u.password_hash))) return res.status(400).json({ error: 'Senha incorreta.' });
+    await pool.query('UPDATE users SET password_hash = $1 WHERE id = $2', [await bcrypt.hash(newPassword, 10), req.user.id]);
+    res.json({ success: true });
+  } catch(e) { res.status(500).json({ error: 'Erro ao alterar senha.' }); }
+});
+
+app.get('/api/my-characters', authenticateToken, async (req, res) => {
+  try {
+    const r = await pool.query(`SELECT t.*, s.name as session_name FROM tokens t JOIN game_sessions s ON t.session_id = s.id WHERE t.owner_id = $1`, [req.user.id]);
+    res.json(r.rows.map(t => ({...t, maxHp: t.max_hp, maxSan: t.max_san, maxWeight: t.max_weight, statusEffects: t.status_effects })));
+  } catch (err) { res.status(500).json({ error: 'Erro.' }); }
+});
+
+// ==================================================================
+// ROTAS DE SESSÃO
+// ==================================================================
+
 app.get('/api/sessions', authenticateToken, async (req, res) => {
   try {
     const r = await pool.query(`SELECT s.*, u.username as gm_name FROM game_sessions s LEFT JOIN users u ON s.gm_id = u.id ORDER BY s.name ASC`);
@@ -69,7 +92,52 @@ app.get('/api/sessions', authenticateToken, async (req, res) => {
   } catch (err) { res.status(500).json({ error: 'Erro ao buscar mesas.' }); }
 });
 
-// --- GAME LOGIC ---
+// --- ROTA DE EXCLUSÃO DE MESA (NOVO) ---
+app.delete('/api/sessions/:id', authenticateToken, async (req, res) => {
+    const { id } = req.params;
+    const client = await pool.connect();
+    try {
+        await client.query('BEGIN');
+        
+        // 1. Verificar se a mesa existe e quem é o dono (gm_id)
+        const sessionCheck = await client.query('SELECT gm_id FROM game_sessions WHERE id = $1', [id]);
+        
+        if (sessionCheck.rows.length === 0) {
+            await client.query('ROLLBACK');
+            return res.status(404).json({ error: 'Mesa não encontrada.' });
+        }
+        
+        // 2. Verificar se o usuário logado é o dono da mesa
+        if (sessionCheck.rows[0].gm_id !== req.user.id) {
+            await client.query('ROLLBACK');
+            return res.status(403).json({ error: 'Apenas o Mestre criador pode excluir esta mesa.' });
+        }
+
+        // 3. Excluir dados relacionados (Cascade Manual para garantir limpeza)
+        const tables = ['tokens', 'walls', 'fogs', 'annotations', 'library_videos', 'library_images', 'library_sounds'];
+        for (const table of tables) {
+            await client.query(`DELETE FROM ${table} WHERE session_id = $1`, [id]);
+        }
+
+        // 4. Excluir a sessão
+        await client.query('DELETE FROM game_sessions WHERE id = $1', [id]);
+
+        await client.query('COMMIT');
+        res.json({ success: true, message: 'Mesa excluída com sucesso.' });
+
+    } catch (e) {
+        await client.query('ROLLBACK');
+        console.error("Erro ao excluir mesa:", e);
+        res.status(500).json({ error: 'Erro interno ao excluir mesa.' });
+    } finally {
+        client.release();
+    }
+});
+
+// ==================================================================
+// ROTAS DO JOGO
+// ==================================================================
+
 app.get('/api/game/:sessionId', authenticateToken, async (req, res) => {
   const { sessionId } = req.params;
   const clientLastUpdate = req.query.since ? parseInt(req.query.since) : 0;
@@ -118,7 +186,6 @@ app.post('/api/game', authenticateToken, async (req, res) => {
     try {
         await client.query('BEGIN');
         
-        // Upsert Session
         const checkSess = await client.query('SELECT id FROM game_sessions WHERE id = $1', [sId]);
         if (checkSess.rows.length > 0) {
             await client.query('UPDATE game_sessions SET name=$1, map_url=$2, status=$3, active_image_id=$4, active_video_id=$5, updated_at=NOW() WHERE id=$6', [name, mapUrl, status, activeImageId, activeVideoId, sId]);
@@ -126,10 +193,8 @@ app.post('/api/game', authenticateToken, async (req, res) => {
              await client.query('INSERT INTO game_sessions (id, name, gm_id, map_url, status, active_image_id, active_video_id, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())', [sId, name, req.user.id, mapUrl, status, activeImageId, activeVideoId]);
         }
 
-        // Clean & Re-insert children (Simplest sync strategy)
         await Promise.all(['tokens', 'walls', 'fogs', 'annotations', 'library_videos', 'library_images', 'library_sounds'].map(t => client.query(`DELETE FROM ${t} WHERE session_id = $1`, [sId])));
 
-        // Re-insert Tokens
         for (const t of tokens) {
              let ownerUUID = null;
              if (t.ownerId) {
@@ -140,8 +205,14 @@ app.post('/api/game', authenticateToken, async (req, res) => {
              [t.id, sId, ownerUUID, t.name, t.url, t.role, t.active, t.x, t.y, t.size, t.hp, t.maxHp, t.san, t.maxSan, t.maxWeight, JSON.stringify(t.stats), JSON.stringify(t.inventory), JSON.stringify(t.statusEffects)]);
         }
         
-        // Re-insert others... (Shortened for brevity, logic remains the same as before)
-        // ... [Insert Walls, Fogs, etc logic here] ...
+        await Promise.all([
+            ...walls.map(w => client.query('INSERT INTO walls (id, session_id, x, y, width, height) VALUES ($1, $2, $3, $4, $5, $6)', [w.id, sId, w.x, w.y, w.width, w.height])),
+            ...fog.map(f => client.query('INSERT INTO fogs (id, session_id, x, y, width, height) VALUES ($1, $2, $3, $4, $5, $6)', [f.id, sId, f.x, f.y, f.width, f.height])),
+            ...annotations.map(a => client.query('INSERT INTO annotations (id, session_id, x, y, title, content, is_revealed, attached_item_data) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)', [a.id, sId, a.x, a.y, a.title, a.content, a.isRevealed, JSON.stringify(a.attachedItem)])),
+            ...videos.map(v => client.query('INSERT INTO library_videos (id, session_id, title, url) VALUES ($1, $2, $3, $4)', [v.id, sId, v.title, v.url])),
+            ...images.map(i => client.query('INSERT INTO library_images (id, session_id, title, url, owner_id) VALUES ($1, $2, $3, $4, $5)', [i.id, sId, i.title, i.url, i.ownerId || null])),
+            ...sounds.map(s => client.query('INSERT INTO library_sounds (id, session_id, name, shortcut_key, url) VALUES ($1, $2, $3, $4, $5)', [s.id, sId, s.name, s.key, s.url]))
+        ]);
 
         await client.query('COMMIT');
         res.json({ success: true, sessionId: sId });
@@ -150,6 +221,13 @@ app.post('/api/game', authenticateToken, async (req, res) => {
         console.error(e);
         res.status(500).json({ error: e.message });
     } finally { client.release(); }
+});
+
+app.post('/log', async (req, res) => {
+    try { 
+        await pool.query('INSERT INTO interaction_logs (id, username, message, response) VALUES ($1, $2, $3, $4)', [crypto.randomUUID(), req.body.usuario, req.body.mensagem, req.body.resposta]); 
+        res.sendStatus(200); 
+    } catch(e) { res.sendStatus(500); }
 });
 
 app.listen(port, () => console.log(`Backend running on ${port}`));
