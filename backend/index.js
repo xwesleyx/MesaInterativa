@@ -9,8 +9,13 @@ const app = express();
 const PORT = process.env.PORT || 10000;
 
 // Configuração Básica
-app.use(cors());
+app.use(cors()); // Permite conexões do Frontend (CORS)
 app.use(express.json({ limit: '50mb' })); // Limite alto para imagens
+
+// Rota de Health Check (Necessária para o Render não derrubar o serviço)
+app.get('/', (req, res) => {
+    res.status(200).send('RPG AI Backend está online!');
+});
 
 // Conexão DB
 const pool = new Pool({
