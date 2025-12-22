@@ -1,4 +1,3 @@
-
 const express = require('express');
 const cors = require('cors');
 const jwt = require('jsonwebtoken');
@@ -7,10 +6,10 @@ const path = require('path');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-const SECRET_KEY = process.env.JWT_SECRET || 'aventurizer_super_secret_key';
+const SECRET_KEY = process.env.JWT_SECRET || 'chave_secreta_padrao_mude_no_render';
 const DATA_DIR = path.join(__dirname, 'data');
 
-// Garantir que a pasta de dados existe
+// Cria a pasta data se não existir
 if (!fs.existsSync(DATA_DIR)) {
     fs.mkdirSync(DATA_DIR);
 }
@@ -18,15 +17,15 @@ if (!fs.existsSync(DATA_DIR)) {
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 
-// Banco de dados em memória persistido em arquivos JSON
-let users = loadData('users.json', []);
-let sessions = loadData('sessions.json', {});
-let characters = loadData('characters.json', []);
-
+// Funções auxiliares de persistência
 function loadData(file, defaultVal) {
     const filePath = path.join(DATA_DIR, file);
     if (fs.existsSync(filePath)) {
-        return JSON.parse(fs.readFileSync(filePath));
+        try {
+            return JSON.parse(fs.readFileSync(filePath));
+        } catch (e) {
+            return defaultVal;
+        }
     }
     return defaultVal;
 }
@@ -35,6 +34,10 @@ function saveData(file, data) {
     fs.writeFileSync(path.join(DATA_DIR, file), JSON.stringify(data, null, 2));
 }
 
+// Carregar dados iniciais
+let users = loadData('users.json', []);
+let sessions = loadData('sessions.json', {});
+
 // Middleware de Autenticação
 const authenticate = (req, res, next) => {
     const authHeader = req.headers.authorization;
@@ -42,7 +45,7 @@ const authenticate = (req, res, next) => {
 
     const token = authHeader.split(' ')[1];
     jwt.verify(token, SECRET_KEY, (err, user) => {
-        if (err) return res.status(403).json({ error: 'Token inválido' });
+        if (err) return res.status(403).json({ error: 'Sessão expirada. Faça login novamente.' });
         req.user = user;
         next();
     });
@@ -50,10 +53,12 @@ const authenticate = (req, res, next) => {
 
 // --- ROTAS ---
 
+app.get('/', (req, res) => res.send('Aventurizer Backend Online!'));
+
 app.post('/api/register', (req, res) => {
     const { username, password, role } = req.body;
     if (users.find(u => u.username === username)) {
-        return res.status(400).json({ error: 'Usuário já existe' });
+        return res.status(400).json({ error: 'Este usuário já existe.' });
     }
     users.push({ username, password, role });
     saveData('users.json', users);
@@ -63,9 +68,9 @@ app.post('/api/register', (req, res) => {
 app.post('/api/login', (req, res) => {
     const { username, password } = req.body;
     const user = users.find(u => u.username === username && u.password === password);
-    if (!user) return res.status(401).json({ error: 'Credenciais inválidas' });
+    if (!user) return res.status(401).json({ error: 'Usuário ou senha incorretos.' });
 
-    const token = jwt.sign({ name: user.username, role: user.role }, SECRET_KEY);
+    const token = jwt.sign({ name: user.username, role: user.role }, SECRET_KEY, { expiresIn: '7d' });
     res.json({ token, user: { name: user.username, role: user.role } });
 });
 
@@ -88,18 +93,16 @@ app.get('/api/game/:id', authenticate, (req, res) => {
     if (session.timestamp <= since) {
         return res.json({ notModified: true });
     }
-
     res.json(session);
 });
 
 app.post('/api/game', authenticate, (req, res) => {
     const state = req.body;
     const sessionId = state.id;
-
-    // Apenas o GM ou se a mesa estiver aberta
     const existing = sessions[sessionId];
+
     if (existing && existing.gmId !== req.user.name && existing.status === 'closed') {
-        return res.status(403).json({ error: 'Mesa fechada para alterações' });
+        return res.status(403).json({ error: 'A mesa está fechada para alterações por jogadores.' });
     }
 
     const newState = {
@@ -114,7 +117,6 @@ app.post('/api/game', authenticate, (req, res) => {
 });
 
 app.get('/api/my-characters', authenticate, (req, res) => {
-    // Busca em todas as sessões por tokens onde o dono é o usuário logado
     const myChars = [];
     Object.values(sessions).forEach(session => {
         const owned = session.tokens.filter(t => t.ownerId === req.user.name);
@@ -123,23 +125,6 @@ app.get('/api/my-characters', authenticate, (req, res) => {
     res.json(myChars);
 });
 
-app.post('/api/change-password', authenticate, (req, res) => {
-    const { oldPassword, newPassword } = req.body;
-    const user = users.find(u => u.username === req.user.name);
-    if (!user || user.password !== oldPassword) {
-        return res.status(400).json({ error: 'Senha atual incorreta' });
-    }
-    user.password = newPassword;
-    saveData('users.json', users);
-    res.json({ message: 'Senha alterada' });
-});
-
-// Log de Interação AI
-app.post('/log', (req, res) => {
-    console.log(`[AI LOG] ${req.body.usuario}: ${req.body.mensagem}`);
-    res.sendStatus(200);
-});
-
 app.listen(PORT, () => {
-    console.log(`Aventurizer Backend rodando na porta ${PORT}`);
+    console.log(`Servidor rodando na porta ${PORT}`);
 });
