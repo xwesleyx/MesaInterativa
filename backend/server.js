@@ -9,17 +9,30 @@ const app = express();
 const PORT = process.env.PORT || 3001;
 const SECRET = process.env.JWT_SECRET || 'aventurizer-v3-secret-key-2025';
 
-// Configuração PostgreSQL para Render/Heroku
+// Log de Diagnóstico
+console.log("-----------------------------------------");
+console.log("Iniciando Aventurizer Backend...");
+console.log(`Node Version: ${process.version}`);
+console.log(`Porta: ${PORT}`);
+console.log("Tentando carregar variáveis de ambiente...");
+
+if (!process.env.DATABASE_URL) {
+  console.warn("AVISO: DATABASE_URL não encontrada! O banco de dados não funcionará.");
+} else {
+  console.log("DATABASE_URL detectada.");
+}
+console.log("-----------------------------------------");
+
+// Configuração PostgreSQL
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false }
 });
 
-// Migrações e Inicialização do Banco
 const initDb = async () => {
-  const client = await pool.connect();
   try {
-    console.log("Iniciando Tabelas PostgreSQL...");
+    const client = await pool.connect();
+    console.log("Conectado ao PostgreSQL com sucesso!");
     await client.query(`
       CREATE TABLE IF NOT EXISTS users (
         id TEXT PRIMARY KEY,
@@ -72,11 +85,10 @@ const initDb = async () => {
       CREATE TABLE IF NOT EXISTS library_sounds (id TEXT PRIMARY KEY, session_id TEXT, name TEXT, shortcut_key TEXT, url TEXT);
       CREATE TABLE IF NOT EXISTS interaction_logs (id TEXT PRIMARY KEY, username TEXT, message TEXT, response TEXT, timestamp BIGINT);
     `);
-    console.log("Banco de Dados Pronto.");
-  } catch (err) {
-    console.error("Erro no DB:", err);
-  } finally {
     client.release();
+    console.log("Tabelas do banco de dados verificadas/criadas.");
+  } catch (err) {
+    console.error("ERRO CRÍTICO AO CONECTAR NO BANCO:", err.message);
   }
 };
 
@@ -85,7 +97,6 @@ initDb();
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 
-// Middleware de Auth
 const authenticateToken = (req, res, next) => {
   const token = req.headers['authorization']?.split(' ')[1];
   if (!token) return res.status(401).json({ error: 'Token ausente.' });
@@ -96,8 +107,7 @@ const authenticateToken = (req, res, next) => {
   });
 };
 
-// Endpoints
-app.get('/api/health', (req, res) => res.json({ status: 'ok', server: 'online' }));
+app.get('/api/health', (req, res) => res.json({ status: 'ok', server: 'online', database: !!process.env.DATABASE_URL }));
 
 app.post('/api/register', async (req, res) => {
   const { username, password, role } = req.body;
@@ -197,9 +207,13 @@ app.post('/api/game', authenticateToken, async (req, res) => {
           [t.id, id, t.ownerId || '', t.name, t.url, t.role, t.active, t.x, t.y, t.size, t.hp, t.maxHp, t.san, t.maxSan, t.maxWeight, t.stats, t.inventory, t.statusEffects]);
       }
     }
-    // Delete and Re-insert for simplicity in this VTT version
+    
     await client.query('DELETE FROM walls WHERE session_id = $1', [id]);
-    if (walls) for (const w of walls) await client.query('INSERT INTO walls (id, session_id, x, y, width, height) VALUES ($1,$2,$3,$4,$5,$6)', [w.id, id, w.x, w.y, w.width, w.height]);
+    if (walls) {
+      for (const w of walls) {
+        await client.query('INSERT INTO walls (id, session_id, x, y, width, height) VALUES ($1,$2,$3,$4,$5,$6)', [w.id, id, w.x, w.y, w.width, w.height]);
+      }
+    }
 
     await client.query('COMMIT');
     res.json({ sessionId: id, timestamp });
@@ -211,4 +225,8 @@ app.post('/api/game', authenticateToken, async (req, res) => {
   }
 });
 
-app.listen(PORT, () => console.log(`Aventurizer V3 Backend na porta ${PORT}`));
+app.listen(PORT, () => {
+  console.log("-----------------------------------------");
+  console.log(`AVENTURIZER ONLINE EM: http://localhost:${PORT}`);
+  console.log("-----------------------------------------");
+});
